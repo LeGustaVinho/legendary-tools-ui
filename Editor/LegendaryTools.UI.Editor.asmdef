@@ -1,0 +1,17 @@
+{
+    "name": "LegendaryTools.UI.Editor",
+    "references": [
+        "GUID:2a6e99f9fe27d5d46a34fe1a17051a29"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
