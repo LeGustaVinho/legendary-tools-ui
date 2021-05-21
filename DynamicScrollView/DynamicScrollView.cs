@@ -7,8 +7,9 @@ using UnityEngine.UI;
 namespace LegendaryTools.UI
 {
     [RequireComponent(typeof(ScrollRect))]
-    public abstract class DynamicScrollView<TGameObject, TData> : MonoBehaviour
+    public abstract class DynamicScrollView<TGameObject, TData> : MonoBehaviour, IDisposable
         where TGameObject : Component, DynamicScrollView<TGameObject, TData>.IListingItem
+        where TData : class
     {
         public interface IListingItem
         {
@@ -17,44 +18,213 @@ namespace LegendaryTools.UI
 
         public event Action<TGameObject, TData> OnCreateItem;
         public event Action<TGameObject, TData> OnRemoveItem;
+        
+        public event Action<List<TGameObject>> OnCompleteListingGeneration;
 
         public List<TGameObject> Listing
         {
             get
             {
-                var listView = new List<TGameObject>();
+                List<TGameObject> listView = new List<TGameObject>();
                 listView.AddRange(itemsAtSlot.Values);
                 return listView;
             }
         }
 
-        [SerializeField] private ScrollRect scrollRect;
-        [SerializeField] private TGameObject prefab;
+        [SerializeField] ScrollRect scrollRect;
+        [SerializeField] TGameObject prefab;
+        [SerializeField] bool canOverrideItemRectTransform;
 
-        [Header("Slots")] [SerializeField] private int SlotNumInstantiateCallsPerFrame = 10;
+        [Header("Slots"), SerializeField]  int SlotNumInstantiateCallsPerFrame = 10;
+        [SerializeField] Vector2 ItemBufferCount;
 
-        private RectTransform slotPrefab;
-        private readonly List<RectTransform> slots = new List<RectTransform>();
-        private Coroutine createSlotsRoutine;
+        RectTransform slotPrefab;
+        readonly List<RectTransform> slots = new List<RectTransform>();
+        Coroutine createSlotsRoutine;
 
-        private RectTransform rectTransform;
-        private Coroutine generateRoutine;
-        private Rect viewportRect;
-        private readonly Vector3[] bufferCorners = new Vector3[4];
-        private Rect bufferRect;
+        bool isInit;
+        bool isGenerating;
+        RectTransform rectTransform;
+        Coroutine generateRoutine;
+        Coroutine scrollToRoutine;
+        int pendingScrollToIndex = -1;
+        Rect viewportRect;
+        readonly Vector3[] bufferCorners = new Vector3[4];
+        Rect bufferRect;
+        RectTransform prefabRectTransform;
 
-        private readonly Dictionary<int, TGameObject> itemsAtSlot = new Dictionary<int, TGameObject>();
+        readonly Dictionary<int, TGameObject> itemsAtSlot = new Dictionary<int, TGameObject>();
+        
+        static string SLOT_PREFAB = "SlotPrefab";
 
         public List<TData> DataSource { get; } = new List<TData>();
 
         public void Generate(TData[] data)
         {
-            if (generateRoutine == null) generateRoutine = StartCoroutine(GenerateView(data));
+            isGenerating = true;
+            Initialize();
+            DestroyAllItems();
+
+            DataSource.Clear();
+            DataSource.AddRange(data);
+            
+            if (gameObject.activeInHierarchy)
+            {
+                if (generateRoutine != null)
+                {
+                    StopCoroutine(generateRoutine);
+                }
+                generateRoutine = StartCoroutine(GenerateView(data));
+            }
+        }
+        
+        public void Refresh(TData itemData)
+        {
+            int index = DataSource.FindIndex(item => item == itemData);
+            if (index >= 0)
+            {
+                if (itemsAtSlot.TryGetValue(index, out TGameObject itemAtSlot))
+                {
+                    itemAtSlot.Init(itemData);
+                }
+            }
+        }
+
+        public void RefreshAll()
+        {
+            foreach (KeyValuePair<int, TGameObject> itemAtSlot in itemsAtSlot)
+            {
+                itemAtSlot.Value.Init(DataSource[itemAtSlot.Key]);
+            }
+        }
+
+        public void ScrollTo(TData itemToFocus)
+        {
+            int slotIndex = DataSource.FindIndex(item => item == itemToFocus);
+
+            if (slotIndex >= 0)
+            {
+                if (isGenerating)
+                {
+                    if (gameObject.activeInHierarchy)
+                    {
+                        if (scrollToRoutine != null)
+                        {
+                            StopCoroutine(scrollToRoutine);
+                        }
+                        scrollToRoutine = StartCoroutine(WaitGenerateAndScrollTo(slotIndex));
+                    }
+                    else
+                    {
+                        pendingScrollToIndex = slotIndex;
+                    }
+                }
+                else
+                {
+                    ScrollTo(slotIndex);
+                }
+            }
+        }
+        
+        public void ScrollToBeginning()
+        {
+            if (isGenerating)
+            {
+                if (gameObject.activeInHierarchy)
+                {
+                    if (scrollToRoutine != null)
+                    {
+                        StopCoroutine(scrollToRoutine);
+                    }
+                    scrollToRoutine = StartCoroutine(WaitGenerateAndScrollTo(0));
+                }
+                else
+                {
+                    pendingScrollToIndex = 0;
+                }
+            }
+            else
+            {
+                ScrollTo(0);
+            }
+        }
+        
+        public void ScrollToEnd()
+        {
+            if (isGenerating)
+            {
+                if (gameObject.activeInHierarchy)
+                {
+                    if (scrollToRoutine != null)
+                    {
+                        StopCoroutine(scrollToRoutine);
+                    }
+                    scrollToRoutine = StartCoroutine(WaitGenerateAndScrollTo(Int32.MaxValue));
+                }
+                else
+                {
+                    pendingScrollToIndex = Int32.MaxValue;
+                }
+            }
+            else
+            {
+                ScrollTo(slots.Count-1);
+            }
+        }
+
+        private void ScrollTo(int index)
+        {
+            if (slots.Count > 0)
+            {
+                index = Mathf.Clamp(index, 0, slots.Count - 1);
+                RectTransform target = slots[index];
+                Vector2 viewportHalfSize = scrollRect.viewport.rect.size * 0.5f;
+                Vector2 contentSize = scrollRect.content.rect.size;
+
+                //get object position inside content
+                Vector3 targetRelativePosition =
+                    scrollRect.content.InverseTransformPoint(target.position);
+
+                //adjust for item size
+                targetRelativePosition += new Vector3(target.rect.size.x, target.rect.size.y, 0f) * 0.25f;
+
+                //get the normalized position inside content
+                Vector2 normalizedPosition = new Vector2(
+                    Mathf.Clamp01(targetRelativePosition.x / (contentSize.x - viewportHalfSize.x)),
+                    1f - Mathf.Clamp01(targetRelativePosition.y / -(contentSize.y - viewportHalfSize.y))
+                );
+
+                //we want the position to be at the middle of the visible area
+                //so get the normalized center offset based on the visible area width and height
+                Vector2 normalizedOffsetPosition =
+                    new Vector2(viewportHalfSize.x / contentSize.x, viewportHalfSize.y / contentSize.y);
+
+                //and apply it
+                normalizedPosition.x -= (1f - normalizedPosition.x) * normalizedOffsetPosition.x;
+                normalizedPosition.y += normalizedPosition.y * normalizedOffsetPosition.y;
+
+                normalizedPosition.x = Mathf.Clamp01(normalizedPosition.x);
+                normalizedPosition.y = Mathf.Clamp01(normalizedPosition.y);
+
+                scrollRect.normalizedPosition = normalizedPosition;
+
+                UpdateVisibility();
+            }
+        }
+        
+        public void Dispose()
+        {
+            Pool.ClearPool(prefab);
+
+            if (slotPrefab != null)
+            {
+                Pool.ClearPool(slotPrefab);
+            }
         }
 
         public void DestroyAllItems()
         {
-            foreach (var itemInSlot in itemsAtSlot)
+            foreach (KeyValuePair<int, TGameObject> itemInSlot in itemsAtSlot)
             {
                 OnItemRemoved(itemInSlot.Value, DataSource[itemInSlot.Key]);
                 OnRemoveItem?.Invoke(itemInSlot.Value, DataSource[itemInSlot.Key]);
@@ -66,23 +236,29 @@ namespace LegendaryTools.UI
 
         protected void Awake()
         {
-            rectTransform = GetComponent<RectTransform>();
+            Initialize();
         }
 
         protected virtual void Start()
         {
-            UpdateViewportRect();
-
-            var newSlotPrefabGo =
-                new GameObject("SlotPrefab", typeof(RectTransform), typeof(GameObjectPoolReference));
-            slotPrefab = newSlotPrefabGo.GetComponent<RectTransform>();
-
-            scrollRect.onValueChanged.AddListener(OnScrollRectChange);
+            Initialize();
         }
 
         protected virtual void OnEnable()
         {
-            if (slots.Count != DataSource.Count) generateRoutine = StartCoroutine(GenerateView(DataSource.ToArray()));
+            if (slots.Count != DataSource.Count)
+            {
+                if (generateRoutine != null)
+                {
+                    StopCoroutine(generateRoutine);
+                }
+                generateRoutine = StartCoroutine(GenerateView(DataSource.ToArray()));
+            }
+
+            if (pendingScrollToIndex >= 0)
+            {
+                scrollToRoutine = StartCoroutine(WaitGenerateAndScrollTo(pendingScrollToIndex));
+            }
         }
 
         protected virtual void OnDisable()
@@ -91,6 +267,12 @@ namespace LegendaryTools.UI
             {
                 StopCoroutine(generateRoutine);
                 generateRoutine = null;
+            }
+            
+            if (scrollToRoutine != null)
+            {
+                StopCoroutine(scrollToRoutine);
+                scrollToRoutine = null;
             }
         }
 
@@ -101,18 +283,36 @@ namespace LegendaryTools.UI
                 StopCoroutine(generateRoutine);
                 generateRoutine = null;
             }
-#if !UNITY_EDITOR
-        foreach (RectTransform slot in slots)
-        {
-            Pool.Destroy(slot);
-        }
+            
+            if (scrollToRoutine != null)
+            {
+                StopCoroutine(scrollToRoutine);
+                scrollToRoutine = null;
+            }
 
-        foreach (var pair in itemsAtSlot)
-        {
-            Pool.Destroy(pair.Value);
-        }
-#endif
+            foreach (RectTransform slot in slots)
+            {
+                if (slot != null)
+                {
+                    Pool.Destroy(slot);
+                }
+            }
+
+            foreach (KeyValuePair<int, TGameObject> pair in itemsAtSlot)
+            {
+                if (pair.Value != null)
+                {
+                    Pool.Destroy(pair.Value);
+                }
+            }
+
             scrollRect.onValueChanged.RemoveListener(OnScrollRectChange);
+
+            if (slotPrefab != null)
+            {
+                Destroy(slotPrefab.gameObject);
+                slotPrefab = null;
+            }
         }
 
         protected virtual void Reset()
@@ -128,31 +328,47 @@ namespace LegendaryTools.UI
         {
         }
 
-        private IEnumerator GenerateView(TData[] data)
+        void Initialize()
         {
-            DestroyAllItems();
+            if (!isInit)
+            {
+                rectTransform = GetComponent<RectTransform>();
+                UpdateViewportRect();
 
-            DataSource.Clear();
-            DataSource.AddRange(data);
+                GameObject newSlotPrefabGo =
+                    new GameObject(SLOT_PREFAB, typeof(RectTransform), typeof(GameObjectPoolReference));
+                slotPrefab = newSlotPrefabGo.GetComponent<RectTransform>();
 
+                prefabRectTransform = prefab.GetComponent<RectTransform>();
+
+                scrollRect.onValueChanged.AddListener(OnScrollRectChange);
+
+                isInit = true;
+            }
+        }
+
+        IEnumerator GenerateView(TData[] data)
+        {
             if (DataSource.Count > slots.Count)
             {
-                var slotsToCreate = Mathf.Clamp(DataSource.Count - slots.Count, 0, SlotNumInstantiateCallsPerFrame);
+                int slotsToCreate = Mathf.Clamp(DataSource.Count - slots.Count, 0, SlotNumInstantiateCallsPerFrame);
 
                 while (slotsToCreate != 0)
                 {
-                    for (var i = 0; i < slotsToCreate; i++)
+                    for (int i = 0; i < slotsToCreate; i++)
                     {
-                        var newSlot = Pool.Instantiate(slotPrefab);
+                        RectTransform newSlot = Pool.Instantiate(slotPrefab);
                         newSlot.SetParent(scrollRect.content);
 
                         newSlot.localPosition = Vector3.zero;
                         newSlot.localScale = Vector3.one;
                         newSlot.localRotation = Quaternion.identity;
+                        newSlot.sizeDelta = prefabRectTransform.sizeDelta; //Note: Layout of the content MAY overwrite the slot size (eg. GridLayoutGroup)
 
                         slots.Add(newSlot);
                     }
 
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
                     yield return new WaitForEndOfFrame(); //wait for layout rebuild
                     yield return
                         new WaitForEndOfFrame(); //wait again to make sure the layout is right on newly created objects
@@ -164,55 +380,86 @@ namespace LegendaryTools.UI
             }
             else if (slots.Count > DataSource.Count)
             {
-                var slotsToRemove = slots.Count - DataSource.Count;
+                int slotsToRemove = slots.Count - DataSource.Count;
 
-                for (var i = 0; i < slotsToRemove; i++)
+                for (int i = 0; i < slotsToRemove; i++)
                 {
-                    var slotToDestroy = slots[slots.Count - 1];
+                    RectTransform slotToDestroy = slots[slots.Count - 1];
                     slots.RemoveAt(slots.Count - 1);
                     Pool.Destroy(slotToDestroy);
                 }
 
+                LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
                 yield return new WaitForEndOfFrame();
+
                 UpdateVisibility();
             }
             else //slots.Count == DataSource.Count
             {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
+                yield return new WaitForEndOfFrame();
+
                 UpdateVisibility();
             }
 
             generateRoutine = null;
+            isGenerating = false;
+            OnCompleteListingGeneration?.Invoke(Listing);
         }
 
-        private void OnScrollRectChange(Vector2 scrollDelta)
+        IEnumerator WaitGenerateAndScrollTo(int index)
         {
-            UpdateViewportRect();
-            UpdateVisibility();
+            yield return new WaitUntil(() => isGenerating == false);
+            ScrollTo(index);
+            pendingScrollToIndex = -1;
+            scrollToRoutine = null;
         }
         
-        private void UpdateVisibility()
+        void OnScrollRectChange(Vector2 scrollDelta)
         {
-            for (var i = 0; i < slots.Count; i++)
-                if (IsVisible(viewportRect, slots[i]))
-                    CreateItemAt(i);
-                else
-                    DestroyItemAt(i);
+            UpdateVisibility();
         }
 
-        private void CreateItemAt(int index)
+        void UpdateVisibility()
+        {
+            UpdateViewportRect();
+            for (int i = 0; i < slots.Count; i++)
+            {
+                if (IsVisible(viewportRect, slots[i]))
+                {
+                    CreateItemAt(i);
+                }
+                else
+                {
+                    DestroyItemAt(i);
+                }
+            }
+        }
+
+        void CreateItemAt(int index)
         {
             if (slots.Count > index && DataSource.Count > index)
+            {
                 if (!itemsAtSlot.ContainsKey(index))
                 {
-                    var newItem = Pool.Instantiate(prefab);
-                    var newItemRT = newItem.GetComponent<RectTransform>();
-                    var prefabRT = prefab.GetComponent<RectTransform>();
+                    TGameObject newItem = Pool.Instantiate(prefab);
+                    RectTransform newItemRT = newItem.GetComponent<RectTransform>();
+                    RectTransform prefabRT = prefab.GetComponent<RectTransform>();
 
                     newItemRT.SetParent(slots[index]);
-
                     newItemRT.localPosition = prefabRT.localPosition;
                     newItemRT.localScale = prefabRT.localScale;
                     newItemRT.localRotation = prefabRT.localRotation;
+
+                    if (canOverrideItemRectTransform)
+                    {
+                        newItemRT.pivot = new Vector2(0.5f, 0.5f);
+                        newItemRT.anchoredPosition = Vector3.zero;
+                        newItemRT.anchorMin = Vector2.zero;
+                        newItemRT.anchorMax = Vector2.one;
+                        newItemRT.offsetMin = Vector2.zero;
+                        newItemRT.offsetMax = Vector2.zero;
+                    }
 
                     itemsAtSlot.Add(index, newItem);
                     newItem.Init(DataSource[index]);
@@ -220,11 +467,12 @@ namespace LegendaryTools.UI
                     OnItemCreated(newItem, DataSource[index]);
                     OnCreateItem?.Invoke(newItem, DataSource[index]);
                 }
+            }
         }
 
-        private void DestroyItemAt(int index)
+        void DestroyItemAt(int index)
         {
-            if (itemsAtSlot.TryGetValue(index, out var viewItem))
+            if (itemsAtSlot.TryGetValue(index, out TGameObject viewItem))
             {
                 itemsAtSlot.Remove(index);
                 OnItemRemoved(viewItem, DataSource[index]);
@@ -234,21 +482,25 @@ namespace LegendaryTools.UI
             }
         }
 
-        private void UpdateViewportRect()
+        void UpdateViewportRect()
         {
             (scrollRect.viewport != null ? scrollRect.viewport : rectTransform).GetWorldCorners(bufferCorners);
 
-            viewportRect.Set(bufferCorners[1].x, bufferCorners[1].y, Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x),
-                Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y));
+            Vector2 estimatedSlotSize = slots.Count > 0 ? slots[0].sizeDelta : new Vector2(0, 0);
+            
+            viewportRect.Set(bufferCorners[1].x - (ItemBufferCount.x * estimatedSlotSize.x), 
+                bufferCorners[1].y + (ItemBufferCount.y * estimatedSlotSize.y), 
+                Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x) + (ItemBufferCount.x * estimatedSlotSize.x * 2),
+                Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y) + (ItemBufferCount.y * estimatedSlotSize.y * 2));
         }
 
-        private bool IsVisible(Rect parentRect, RectTransform rectTransform)
+        bool IsVisible(Rect parentRect, RectTransform rectTransform)
         {
             if (rectTransform != null)
             {
                 rectTransform.GetWorldCorners(bufferCorners);
-                var width = Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x);
-                var height = Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y);
+                float width = Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x);
+                float height = Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y);
 
                 bufferRect.Set(bufferCorners[1].x, bufferCorners[1].y + parentRect.height - height, width, height);
                 return parentRect.Overlaps(bufferRect);
@@ -256,5 +508,28 @@ namespace LegendaryTools.UI
 
             return false;
         }
+        
+        // void OnDrawGizmos()
+        // {
+        //     // Green
+        //     Gizmos.color = new Color(0.0f, 1.0f, 0.0f);
+        //     DrawRect(viewportRect);
+        //     
+        //     Gizmos.color = new Color(0.0f, 0.0f, 1.0f);
+        //     for (int i = 0; i < slots.Count; i++)
+        //     {
+        //         slots[i].GetWorldCorners(bufferCorners);
+        //         float width = Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x);
+        //         float height = Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y);
+        //
+        //         bufferRect.Set(bufferCorners[1].x, bufferCorners[1].y + viewportRect.height - height, width, height);
+        //         DrawRect(bufferRect);
+        //     }
+        // }
+        //
+        // void DrawRect(Rect rect)
+        // {
+        //     Gizmos.DrawWireCube(new Vector3(rect.center.x, rect.center.y, 0.01f), new Vector3(rect.size.x, rect.size.y, 0.01f));
+        // }
     }
 }
