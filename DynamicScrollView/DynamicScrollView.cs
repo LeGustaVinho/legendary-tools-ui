@@ -298,13 +298,7 @@ namespace LegendaryTools.UI
                 }
             }
 
-            foreach (KeyValuePair<int, TGameObject> pair in itemsAtSlot)
-            {
-                if (pair.Value != null)
-                {
-                    Pool.Destroy(pair.Value);
-                }
-            }
+            DestroyAllItems();
 
             scrollRect.onValueChanged.RemoveListener(OnScrollRectChange);
 
