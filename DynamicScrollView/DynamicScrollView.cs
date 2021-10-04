@@ -215,11 +215,6 @@ namespace LegendaryTools.UI
         public void Dispose()
         {
             Pool.ClearPool(prefab);
-
-            if (slotPrefab != null)
-            {
-                Pool.ClearPool(slotPrefab);
-            }
         }
 
         public void DestroyAllItems()
@@ -479,8 +474,14 @@ namespace LegendaryTools.UI
         void UpdateViewportRect()
         {
             (scrollRect.viewport != null ? scrollRect.viewport : rectTransform).GetWorldCorners(bufferCorners);
-
-            Vector2 estimatedSlotSize = slots.Count > 0 ? slots[0].sizeDelta : new Vector2(0, 0);
+            
+            Vector2 estimatedSlotSize = new Vector2(0, 0);
+            if (slots.Count > 0)
+            {
+                Vector3[] slotCorners = new Vector3[4];
+                slots[0].GetWorldCorners(slotCorners);
+                estimatedSlotSize.Set(slotCorners[2].x - slotCorners[1].x, slotCorners[1].y - slotCorners[0].y);
+            }
             
             viewportRect.Set(bufferCorners[1].x - (ItemBufferCount.x * estimatedSlotSize.x), 
                 bufferCorners[1].y + (ItemBufferCount.y * estimatedSlotSize.y), 
