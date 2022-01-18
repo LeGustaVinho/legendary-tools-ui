@@ -31,9 +31,11 @@ namespace LegendaryTools.UI
             }
         }
 
+        [SerializeField] Canvas canvas;
         [SerializeField] ScrollRect scrollRect;
         [SerializeField] TGameObject prefab;
         [SerializeField] bool canOverrideItemRectTransform;
+        [SerializeField] bool debugMode;
 
         [Header("Slots"), SerializeField]  int SlotNumInstantiateCallsPerFrame = 10;
         [SerializeField] Vector2 ItemBufferCount;
@@ -322,6 +324,11 @@ namespace LegendaryTools.UI
             if (!isInit)
             {
                 rectTransform = GetComponent<RectTransform>();
+                if (canvas == null)
+                {
+                    canvas = rectTransform.GetComponentInParent<Canvas>();
+                }
+                
                 UpdateViewportRect();
 
                 GameObject newSlotPrefabGo =
@@ -474,19 +481,23 @@ namespace LegendaryTools.UI
         void UpdateViewportRect()
         {
             (scrollRect.viewport != null ? scrollRect.viewport : rectTransform).GetWorldCorners(bufferCorners);
+            for (int j = 0; j < bufferCorners.Length; j++)
+            {
+                bufferCorners[j] = canvas.transform.InverseTransformVector(bufferCorners[j]);
+            }
             
             Vector2 estimatedSlotSize = new Vector2(0, 0);
             if (slots.Count > 0)
             {
                 Vector3[] slotCorners = new Vector3[4];
                 slots[0].GetWorldCorners(slotCorners);
-                estimatedSlotSize.Set(slotCorners[2].x - slotCorners[1].x, slotCorners[1].y - slotCorners[0].y);
+                estimatedSlotSize.Set(Vector3.Distance(slotCorners[2], slotCorners[1]), Vector3.Distance(slotCorners[1],slotCorners[0]));
             }
-            
+
             viewportRect.Set(bufferCorners[1].x - (ItemBufferCount.x * estimatedSlotSize.x), 
                 bufferCorners[1].y + (ItemBufferCount.y * estimatedSlotSize.y), 
-                Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x) + (ItemBufferCount.x * estimatedSlotSize.x * 2),
-                Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y) + (ItemBufferCount.y * estimatedSlotSize.y * 2));
+                Vector3.Distance(bufferCorners[2], bufferCorners[1]) + (ItemBufferCount.x * estimatedSlotSize.x * 2),
+                Vector3.Distance(bufferCorners[1],bufferCorners[0]) + (ItemBufferCount.y * estimatedSlotSize.y * 2));
         }
 
         bool IsVisible(Rect parentRect, RectTransform rectTransform)
@@ -494,37 +505,66 @@ namespace LegendaryTools.UI
             if (rectTransform != null)
             {
                 rectTransform.GetWorldCorners(bufferCorners);
-                float width = Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x);
-                float height = Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y);
+                for (int i = 0; i < bufferCorners.Length; i++)
+                {
+                    bufferCorners[i] = canvas.transform.InverseTransformVector(bufferCorners[i]);
+                }
 
-                bufferRect.Set(bufferCorners[1].x, bufferCorners[1].y + parentRect.height - height, width, height);
+                float width = Mathf.Abs(Vector3.Distance(bufferCorners[2] ,bufferCorners[1]));
+                float height = Mathf.Abs(Vector3.Distance(bufferCorners[1], bufferCorners[0]));
+
+                bufferRect.Set(bufferCorners[1].x, bufferCorners[1].y + - height + parentRect.height , width, height);
                 return parentRect.Overlaps(bufferRect);
             }
 
             return false;
         }
+
+#if UNITY_EDITOR
+        void OnDrawGizmos()
+        {
+            if (!debugMode) return;
+            
+            Gizmos.color = new Color(0.0f, 1.0f, 0.0f);
+            (scrollRect.viewport != null ? scrollRect.viewport : rectTransform).GetWorldCorners(bufferCorners);
+            
+            for (int j = 0; j < bufferCorners.Length; j++)
+            {
+                bufferCorners[j] = canvas.transform.InverseTransformVector(bufferCorners[j]);
+            }
+
+            float viewportHeight = Vector3.Distance(bufferCorners[1], bufferCorners[0]);
+            
+            DrawRect(new Rect(bufferCorners[1].x, 
+                bufferCorners[1].y, 
+                Vector3.Distance(bufferCorners[2], bufferCorners[1]),
+                viewportHeight));
+
+             Gizmos.color = new Color(0.0f, 0.0f, 1.0f);
+             for (int i = 0; i < slots.Count; i++)
+             {
+                 slots[i].GetWorldCorners(bufferCorners);
+                 for (int j = 0; j < bufferCorners.Length; j++)
+                 {
+                     bufferCorners[j] = canvas.transform.InverseTransformVector(bufferCorners[j]);
+                 }
+                 
+                 float width = Mathf.Abs(Vector3.Distance(bufferCorners[2] ,bufferCorners[1]));
+                 float height = Mathf.Abs(Vector3.Distance(bufferCorners[1], bufferCorners[0]));
+            
+                 bufferRect.Set(bufferCorners[1].x, bufferCorners[1].y - height + viewportHeight, width, height);
+                 DrawRect(bufferRect);
+             }
+        }
         
-        // void OnDrawGizmos()
-        // {
-        //     // Green
-        //     Gizmos.color = new Color(0.0f, 1.0f, 0.0f);
-        //     DrawRect(viewportRect);
-        //     
-        //     Gizmos.color = new Color(0.0f, 0.0f, 1.0f);
-        //     for (int i = 0; i < slots.Count; i++)
-        //     {
-        //         slots[i].GetWorldCorners(bufferCorners);
-        //         float width = Mathf.Abs(bufferCorners[2].x - bufferCorners[1].x);
-        //         float height = Mathf.Abs(bufferCorners[1].y - bufferCorners[0].y);
-        //
-        //         bufferRect.Set(bufferCorners[1].x, bufferCorners[1].y + viewportRect.height - height, width, height);
-        //         DrawRect(bufferRect);
-        //     }
-        // }
-        //
-        // void DrawRect(Rect rect)
-        // {
-        //     Gizmos.DrawWireCube(new Vector3(rect.center.x, rect.center.y, 0.01f), new Vector3(rect.size.x, rect.size.y, 0.01f));
-        // }
+        void DrawRect(Rect rect)
+        {
+            Gizmos.DrawWireCube(new Vector3(rect.center.x, rect.center.y, 0.01f), new Vector3(rect.size.x, rect.size.y, 0.01f));
+            // Gizmos.DrawLine(new Vector3(rect.x, rect.y, 0), new Vector3(rect.xMax, rect.y));
+            // Gizmos.DrawLine(new Vector3(rect.x, rect.y, 0), new Vector3(rect.x, rect.yMax));
+            // Gizmos.DrawLine(new Vector3(rect.xMax, rect.y, 0), new Vector3(rect.xMax, rect.yMax));
+            // Gizmos.DrawLine(new Vector3(rect.x, rect.yMax, 0), new Vector3(rect.xMax, rect.yMax));
+        }
+#endif
     }
 }
